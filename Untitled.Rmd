@@ -1,0 +1,538 @@
+---
+title: "Kawaguchi Lecture Note Assignment 7"
+author: "Shinji Koiso"
+date: '`r Sys.Date()`'
+output:
+  html_document: 
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Problem
+
+https://kohei-kawaguchi.github.io/EmpiricalIO/assignment7.html
+
+# Coding
+```{r message=FALSE}
+# ワークスペースを初期化
+rm(list = ls())
+
+# パッケージを読み込む
+require(tidyverse)
+# install.packages("numDeriv")
+library(numDeriv)
+library(foreach)
+library(latex2exp)
+```
+
+## Simulate Data
+
+### 1 Set constants and parameters as follows:
+
+```{r}
+# set seed
+set.seed(1)
+# set constants 
+L <- 5
+K <- 1
+T <- 100
+N <- 1000
+lambda <- 1e-10
+# set parameters
+alpha <- 0.5
+beta <- 3
+kappa <- 0.1
+gamma <- 0.6
+delta <- 0.95
+```
+
+### 2. Write function `compute_PI(alpha, beta, L, K)`
+
+```{r}
+compute_PI =  function(alpha, beta, L, K){
+  expand_grid(a = 0:K, s = 1:L) %>% 
+    mutate(pi = alpha*log(s) - beta*a) %>% 
+    arrange(s) %>% 
+    select(pi) %>% 
+    unlist() %>% 
+    as.matrix() 
+}
+
+PI <- compute_PI(alpha, beta, L, K); PI
+```
+
+
+### 3. Write function `compute_G(kappa, gamma, L, K)`
+```{r}
+
+compute_G =  function(kappa, gamma, L, K){
+  trans_mat <-
+    matrix(0, ncol = L, nrow = 2*L)
+  
+  for (i in 3:(2*(L-1))) {
+    if(i%%2 == 1){
+      for (j in 1:L) {
+        if (i %/% 2 + 1 == j){
+          trans_mat[i,j] <- 1 - kappa
+        } else if (i %/% 2 + 1 == j + 1) {
+          trans_mat[i,j] <- kappa
+        }
+      }
+    } else if(i%%2 == 0){
+      for (j in 1:L) {
+        if (i %/% 2 == j-1){
+          trans_mat[i,j] <- gamma
+        } else if (i %/% 2 == j + 1) {
+          trans_mat[i,j] <- kappa
+        } else if (i %/% 2  == j) {
+          trans_mat[i,j] <- 1 - gamma - kappa
+        }
+      }
+    } 
+  }
+  trans_mat[1,1] <- 1
+  trans_mat[2,1] <- 1 - gamma
+  trans_mat[2,2] <- gamma
+  trans_mat[2*L - 1,L - 1] <- kappa
+  trans_mat[2*L - 1,L] <- 1 - kappa
+  trans_mat[2*L,L - 1] <- kappa
+  trans_mat[2*L,L] <- 1 - kappa
+  
+  return(trans_mat)
+}
+
+G <- compute_G(kappa, gamma, L, K); G
+```
+
+
+
+### 3. Write a function compute_exante_value(p, PI, G, L, K, delta)
+
+Policy function iteration (value function of a policy is calculated by inversion)
+```{r}
+Euler_const <- - digamma(1)
+p <- matrix(rep(0.5, L * (K + 1)), ncol = 1)
+compute_exante_value <- 
+  function(p, PI, G, L, K, delta) {
+    # p: K*L vector policy
+    # Sigma(p): L x 2L matrix (diagonalize p) policy matrix
+    
+    Sigma = (rep(1,L) %x% t(p))*(diag(rep(1,L)) %>% 
+                                    rep(each = 2) %>% 
+                                    matrix(ncol = 2*L,byrow = T))
+    
+    
+    E = Euler_const - log(p)
+    phi = solve(diag(rep(1,L)) - delta*Sigma %*% G)%*%Sigma%*%(PI + E)
+    return(phi)
+  }
+
+V <- compute_exante_value(p, PI, G, L, K, delta); V 
+```
+
+### 4. Write a function `compute_ccp(V, PI, G, L, K, delta)`
+```{r}
+value = function(V, PI, G, delta){
+  PI + delta*G%*%V
+}
+
+compute_ccp = function(V, PI, G, L, K, delta){
+  exp_value = exp(value(V, PI, G, delta))
+  
+  ccp = matrix(exp_value,ncol=(K+1),byrow = T)/rowSums(matrix(exp_value,ncol=(K+1),byrow = T))
+  
+  
+  matrix(t(ccp),ncol = 1,byrow = T)
+}
+
+p <- compute_ccp(V, PI, G, L, K, delta); p
+```
+
+### 5. Write a function `solve_dynamic_decision(PI, G, L, K, delta, lambda)`
+```{r}
+
+solve_dynamic_decision = function(PI, G, L, K, delta, lambda){
+  p <- rep(c(0.8,0.2),5)
+  V <- matrix(rep(0, L), ncol = 1)
+  itmax = 1000
+  diff = 1000
+  
+  for(iter in 1:itmax){
+    V_new = compute_exante_value(p, PI, G, L, K, delta)
+    p <- compute_ccp(V_new, PI, G, L, K, delta)
+    # 価値関数の更新による差を評価
+    diff <- sum(abs(V_new-V))
+    
+    # 価値関数を次のループに渡す(価値関数の更新)
+    V <- V_new
+    
+    if(diff < lambda){
+      #cat(paste0("conveged! iter: #",iter," dif: ",diff," \n"))
+      break
+    }
+  }
+  return(list(p = p,V = V))
+}
+
+
+output <- solve_dynamic_decision(PI, G, L, K, delta, lambda);output
+ p = output$p
+ V = output$V
+```
+
+
+#### alternative. VFI
+```{r}
+
+contraction <- 
+  function(p, PI, G, L, K, delta) {
+    U <- matrix(PI,ncol=(K+1),byrow = T)
+    
+    Ga0 = G[seq(1,2*L,2),]
+    Ga1 = G[seq(2,2*L,2),]
+    # 価値関数の初期値
+    EV_old <- matrix(0, nrow = L, ncol = 1+K)
+    
+    # 価値関数の差の初期値
+    diff <- 1000
+    
+    # 縮小写像の誤差範囲
+    tol_level <- 1.0e-10
+    
+    iter = 0
+    
+    while (iter < 1000 & diff > tol_level) {
+      # 選択ごとの価値関数を計算
+      EV_new <- cbind(
+        EV_not_buy <- 
+          Euler_const + Ga0 %*% log(rowSums(exp(U + delta*EV_old))),
+        EV_buy <-
+          Euler_const + Ga1 %*% log(rowSums(exp(U + delta*EV_old)))
+      )
+      # 価値関数の更新による差を評価
+      diff <- sum(abs(EV_new-EV_old))
+      
+      # 価値関数を次のループに渡す(価値関数の更新)
+      EV_old <- EV_new
+      
+      iter = iter + 1
+    }
+    EV <- EV_old
+    colnames(EV) <- c("EV_not_buy", "EV_buy")
+    return(EV)
+  }
+
+EV_true
+```
+
+
+```{r}
+# EVを求める
+start_time <- proc.time()
+
+EV_true <- contraction(p, PI, G, L, K, delta)
+
+end_time <- proc.time()
+cat("Runtime:\n")
+print((end_time - start_time)[[3]])
+
+
+# 選択毎の価値関数を定義する
+U <- matrix(PI,ncol=(K+1),byrow = T)
+    
+Ga0 = G[seq(1,2*L,2),]
+Ga1 = G[seq(2,2*L,2),]
+
+V_CS_true <- U + delta*EV_true
+colnames(V_CS_true) <- c("V_not_buy", "V_buy")
+
+V_CS_true
+```
+
+```{r}
+# state(p,m)ごとに、logitで計算される理論上の条件付き購入確率を計算
+prob_notbuy_true_mat <- exp(V_CS_true[,"V_not_buy"])/rowSums(exp(V_CS_true))
+prob_buy_true_mat <- exp(V_CS_true[,"V_buy"])/rowSums(exp(V_CS_true))
+p = cbind(prob_notbuy_true_mat,prob_buy_true_mat) %>% 
+  t() %>% 
+  matrix(ncol = 1)
+```
+
+
+
+
+### 6. Write a function simulate_dynamic_decision(p, s, G, L, K, T, delta, seed)
+
+
+```{r}
+
+simulate_dynamic_decision = function(p, s, G, L, K, T, delta, seed){
+  set.seed(seed)
+  df <- 
+    dplyr::tibble(
+      t = 1:T,
+      s = s,
+      a = 0,
+      e = runif(T),
+      e2 = runif(T)
+    ) 
+  
+  cumG = t(apply(G,1,cumsum))
+  
+  for (t in 1:(T-1)) {
+    # t期のstateを取得
+    state <- df$s[t]
+    
+    action = (p[2*state] > df$e[t])*1
+    
+    df$a[t] = action
+    
+    trans_cum <- cumG[2*state - 1 + action,]
+    
+    df$s[t+1] <- min((1:L)[which(trans_cum>df$e2[t])])
+  }
+  
+  return(df %>% 
+           select(t, s, a))
+}
+
+
+```
+
+
+```{r}
+# set initial value
+s <- 1
+# draw simulation for a firm
+seed <- 1
+df <- simulate_dynamic_decision(p, s, G, L, K, T, delta, seed); df
+```
+
+### 7. Write a function `simulate_dynamic_decision_across_firms(p, s, G, L, K, T, N, delta)`
+```{r}
+simulate_dynamic_decision_across_firms = function(p, s, G, L, K, T, N, delta){
+  
+  df = dplyr::tibble(
+      t = NA,
+      s = NA,
+      a = NA,
+      i = NA
+    ) 
+  
+  for(n in 1:N){
+    df_n = simulate_dynamic_decision(p, s, G, L, K, T, delta, n) %>% 
+      mutate(i = n)
+    
+    df = rbind(df, df_n)
+  }
+  
+  df = df %>% 
+    drop_na() %>% 
+    relocate(i)
+  
+  return(df)
+}
+```
+
+```{r}
+df <- simulate_dynamic_decision_across_firms(p, s, G, L, K, T, N, delta)
+save(df, file = "data/A7_df.RData")
+```
+
+
+```{r}
+load(file = "data/A7_df.RData")
+df
+```
+
+### 8. Write a function estimate_ccp(df)
+```{r}
+estimate_ccp = function(df){
+  df %>%
+    dplyr::group_by(s) %>%
+    dplyr::summarize(num_state = n(),
+                     sum_action = sum(a),
+                     .groups = 'drop') %>%
+    dplyr::mutate(ccp_a0 = 1 - sum_action / num_state,
+                  ccp_a1 = 1 - ccp_a0) %>% 
+    dplyr::select(ccp_a0,ccp_a1) %>% 
+    as.matrix() %>% 
+    t() %>% 
+    matrix(ncol = 1)
+}
+
+  
+p_est <- estimate_ccp(df)
+check_ccp <- cbind(p, p_est)
+colnames(check_ccp) <- c("true", "estimate")
+check_ccp <- check_ccp %>%
+  reshape2::melt()
+ggplot(data = check_ccp, aes(x = Var1, y = value, 
+                             fill = Var2)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(fill = "Value") + xlab("action/state") + ylab("probability")
+```
+
+### 9. Write a function `estimate_G(df)`
+```{r}
+estimate_G = function(df){
+  df %>%
+    group_by(i) %>% 
+    mutate(s_n = lead(s)) %>%
+    drop_na() %>% 
+    dplyr::group_by(s, a, s_n) %>%
+    dplyr::summarize(num_sas = n(),
+                     .groups = 'drop') %>%
+    dplyr::group_by(s, a) %>%
+    mutate(sum_sa = sum(num_sas),
+           trans_prob = num_sas/ sum_sa) %>% 
+    dplyr::select(s,a, s_n, trans_prob) %>% 
+    ungroup() %>% 
+    right_join(.,expand.grid(s=1:L,a=0:K,s_n = 1:L),
+                    by = c("s", "a", "s_n")) %>% 
+    arrange(s,a,s_n) %>% 
+    mutate(trans_prob = ifelse(is.na(trans_prob),0,trans_prob))%>% 
+    pivot_wider(id_cols = c(s,a),
+                values_from = trans_prob,
+                names_from = s_n) %>% 
+    select(-c(s,a)) %>% 
+    as.matrix()
+}
+G_est <- estimate_G(df); G_est
+```
+```{r}
+check_G <- data.frame(type = "true", reshape2::melt(G))
+check_G_est <- data.frame(type = "estimate", reshape2::melt(G_est))
+check_G <- rbind(check_G, check_G_est)
+check_G$variable = paste(check_G$Var1, check_G$Var2, sep = "_")
+ggplot(data = check_G, aes(x = variable, y = value,
+                           fill = type)) +
+    geom_bar(stat = "identity", position = "dodge") +
+  labs(fill = "Value") + xlab("action/state/state") + ylab("probability") +
+  theme(axis.text.x = element_blank())
+```
+
+## Estimate parameters
+
+### 1. Vectorize the parameters as follows:
+```{r}
+theta_1 <- c(alpha, beta)
+theta_2 <- c(kappa, gamma)
+theta <- c(theta_1, theta_2)
+```
+
+### 2. Write a function `compute_loglikelihood_NFP(theta, df, delta, L, K)`
+```{r}
+compute_loglikelihood_NFP = function(theta, df, delta, L, K){
+
+  output = solve_dynamic_decision(PI = compute_PI(alpha = theta[1], beta = theta[2], L, K),
+                         G = compute_G(kappa = theta[3], gamma = theta[4], L, K),
+                         L, K, delta, lambda)
+  
+  p = output$p
+  
+  df %>% 
+    group_by(i) %>% 
+    mutate(s_n = lead(s),
+           trans_prob = case_when(
+             s>1 & s<L & a==0 & s==s_n ~ 1 - theta[3],
+             s>1 & s<L & a==0 & s==s_n+1 ~ theta[3],
+             s>1 & s<L & a==1 & s==s_n-1 ~ theta[4],
+             s>1 & s<L & a==1 & s==s_n+1 ~ theta[3],
+             s>1 & s<L & a==1 & s==s_n ~ 1-theta[3]-theta[4],
+             #s==1
+             s==1 & a==0 & s==s_n ~ 1,
+             s==1 & a==1 & s==s_n-1 ~ theta[4],
+             s==1 & a==1 & s==s_n ~ 1-theta[4],
+             #s==L
+             s==L  & s==s_n ~ 1 - theta[3],
+             s==L  & s==s_n + 1 ~ theta[3]
+           ),
+           trans_prob = ifelse(is.na(trans_prob),1,trans_prob),
+           log_tp = log(trans_prob),
+           action_prob = p[2*s - 1 + a],
+           log_ap = log(action_prob),
+           log_pb = log_tp + log_ap) %>% 
+    ungroup() %>% 
+    summarise(log_ll = sum(log_pb)/N/T) %>% 
+    unlist() %>% 
+    unname()
+  }
+
+loglikelihood <- compute_loglikelihood_NFP(theta, df, delta, L, K); loglikelihood
+```
+
+### 3. Check the value of the objective function around the true parameter.
+
+```{r}
+
+# label
+label <- c("\\alpha", "\\beta", "\\kappa", "\\gamma")
+label <- paste("$", label, "$", sep = "")
+# compute the graph
+graph <- foreach (i = 1:length(theta)) %do% {
+  theta_i <- theta[i]
+  theta_i_list <- theta_i * seq(0.8, 1.2, by = 0.05)
+  objective_i <- 
+    foreach (j = 1:length(theta_i_list),
+             .combine = "rbind") %do% {
+               theta_ij <- theta_i_list[j]
+               theta_j <- theta
+               theta_j[i] <- theta_ij
+               objective_ij <- 
+                 compute_loglikelihood_NFP(
+                   theta_j, df, delta, L, K)
+
+               return(objective_ij)
+             }
+  df_graph <- data.frame(x = theta_i_list, y = objective_i) 
+  g <- ggplot(data = df_graph, aes(x = x, y = y)) + 
+    geom_point() +
+    geom_vline(xintercept = theta_i, linetype = "dotted") +
+    ylab("objective function") + xlab(TeX(label[i]))
+  return(g)
+}
+graph
+#save(graph, file = "data/A7_NFP_graph.RData")
+```
+
+
+### 4. Estiamte the parameters by maximizing the loglikelihood.
+```{r}
+lower <- rep(0, length(theta))
+upper <- c(1, 5, 0.2, 0.7)
+NFP_result <-
+  optim(par = theta,
+        fn = compute_loglikelihood_NFP,
+        method = "L-BFGS-B",
+        lower = lower,
+        upper = upper,
+        control = list(fnscale = -1),
+        df = df, 
+        delta = delta,
+        L = L,
+        K = K)
+save(NFP_result, file = "data/A7_NFP_result.RData")
+
+load(file = "data/A7_NFP_result.RData")
+NFP_result
+```
+
+### Estimate the standard error
+
+```{r}
+hessian <- numDeriv::hessian(func = compute_loglikelihood_NFP$par, x = NFP_result, 
+                            df = df, 
+                            delta = delta,
+                            L = L,
+                            K = K)
+theta_se <- sqrt(diag(solve(-hessian)))
+dplyr::tibble(theta_est, theta_se)
+```
