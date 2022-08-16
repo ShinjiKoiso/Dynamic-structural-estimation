@@ -465,7 +465,7 @@ compute_loglikelihood_NFP = function(theta, df, delta, L, K){
     unlist() %>% 
     unname()
   }
-
+p
 loglikelihood <- compute_loglikelihood_NFP(theta, df, delta, L, K); loglikelihood
 ```
 
@@ -524,15 +524,278 @@ save(NFP_result, file = "data/A7_NFP_result.RData")
 load(file = "data/A7_NFP_result.RData")
 NFP_result
 ```
+```{r}
+compare <-
+  data.frame(
+    true = theta,
+    estimate = NFP_result$par
+  )
+compare
+```
 
 ### Estimate the standard error
 
 ```{r}
-hessian <- numDeriv::hessian(func = compute_loglikelihood_NFP$par, x = NFP_result, 
+theta_est <- NFP_result$par
+hessian <- numDeriv::hessian(func = compute_loglikelihood_NFP, 
+                             x = theta_est, 
                             df = df, 
                             delta = delta,
                             L = L,
                             K = K)
+
 theta_se <- sqrt(diag(solve(-hessian)))
 dplyr::tibble(theta_est, theta_se)
 ```
+
+### 2-step estimation
+
+#### 1st step
+```{r}
+loglikelihood_1st = function(theta2, df, delta, L, K){
+  df %>% 
+    group_by(i) %>% 
+    mutate(s_n = lead(s),
+           trans_prob = case_when(
+             s>1 & s<L & a==0 & s==s_n ~ 1 - theta2[1],
+             s>1 & s<L & a==0 & s==s_n+1 ~ theta2[1],
+             s>1 & s<L & a==1 & s==s_n-1 ~ theta2[2],
+             s>1 & s<L & a==1 & s==s_n+1 ~ theta2[1],
+             s>1 & s<L & a==1 & s==s_n ~ 1-theta2[1]-theta2[2],
+             #s==1
+             s==1 & a==0 & s==s_n ~ 1,
+             s==1 & a==1 & s==s_n-1 ~ theta2[2],
+             s==1 & a==1 & s==s_n ~ 1-theta2[2],
+             #s==L
+             s==L  & s==s_n ~ 1 - theta2[1],
+             s==L  & s==s_n + 1 ~ theta2[1]
+           ),
+           trans_prob = ifelse(is.na(trans_prob),1,trans_prob),
+           log_tp = log(trans_prob)) %>% 
+    ungroup() %>% 
+    summarise(log_ll = sum(log_tp)/N/T) %>% 
+    unlist() %>% 
+    unname()
+}
+
+lower <- rep(0, length(theta_2))
+upper <- c(1, 1)
+first_result <-
+  optim(par = theta_2,
+        fn = loglikelihood_1st,
+        method = "L-BFGS-B",
+        lower = lower,
+        upper = upper,
+        control = list(fnscale = -1),
+        df = df, 
+        delta = delta,
+        L = L,
+        K = K)
+
+theta2_est = first_result$par
+```
+
+influence function
+```{r}
+inf_1st = df %>% 
+    group_by(i) %>% 
+    mutate(s_n = lead(s),
+           grad_kappa = case_when(
+             s>1 & s<L & a==0 & s==s_n ~ -1/(1 - theta2_est[1]),
+             s>1 & s<L & a==0 & s==s_n+1 ~ 1/theta2_est[1],
+             s>1 & s<L & a==1 & s==s_n-1 ~ 0,
+             s>1 & s<L & a==1 & s==s_n+1 ~ 1/theta2_est[1],
+             s>1 & s<L & a==1 & s==s_n ~ -1/(1-theta2_est[1]-theta2_est[2]),
+             #s==1
+             s==1 & a==0 & s==s_n ~ 0,
+             s==1 & a==1 & s==s_n-1 ~ 0,
+             s==1 & a==1 & s==s_n ~ 0,
+             #s==L
+             s==L  & s==s_n ~ -1/(1 - theta2_est[1]),
+             s==L  & s==s_n + 1 ~ 1/theta2_est[1]
+           ),
+           grad_gamma = case_when(
+             s>1 & s<L & a==0 & s==s_n ~ 0,
+             s>1 & s<L & a==0 & s==s_n+1 ~ 0,
+             s>1 & s<L & a==1 & s==s_n-1 ~ 1/theta2_est[2],
+             s>1 & s<L & a==1 & s==s_n+1 ~ 0,
+             s>1 & s<L & a==1 & s==s_n ~ -1/(1-theta2_est[1]-theta2_est[2]),
+             #s==1
+             s==1 & a==0 & s==s_n ~ 0,
+             s==1 & a==1 & s==s_n-1 ~ 1/theta2_est[2],
+             s==1 & a==1 & s==s_n ~ -1/(1-theta2_est[2]),
+             #s==L
+             s==L  & s==s_n ~ 0,
+             s==L  & s==s_n + 1 ~ 0
+           ),
+           grad_gamma = ifelse(is.na(grad_gamma),0,grad_gamma),
+           grad_kappa = ifelse(is.na(grad_kappa),0,grad_kappa)) %>% 
+    ungroup() %>% 
+    select(grad_kappa,grad_gamma) %>% 
+    as.matrix()
+
+sqrt(diag(t(inf_1st) %*% inf_1st/(N*T)^2 ))
+```
+
+#### 2nd step
+```{r}
+compute_loglikelihood_NFP_2nd = function(theta, df, delta, L, K, theta2_est){
+  
+  G_est = compute_G(theta2_est[1],theta2_est[2], L, K)
+  
+  output = solve_dynamic_decision(PI = compute_PI(alpha = theta[1], beta = theta[2], L, K),
+                         G = G_est,
+                         L, K, delta, lambda)
+  
+  p = output$p
+  
+  df %>% 
+    group_by(i) %>% 
+    mutate(action_prob = p[2*s - 1 + a],
+           log_ap = log(action_prob)) %>% 
+    ungroup() %>% 
+    summarise(log_ll = sum(log_ap)/N/T) %>% 
+    unlist() %>% 
+    unname()
+  }
+
+loglikelihood <- compute_loglikelihood_NFP_2nd(theta, df, delta, L, K, theta2_est); loglikelihood
+```
+
+
+
+```{r}
+# label
+label <- c("\\alpha", "\\beta")
+label <- paste("$", label, "$", sep = "")
+# compute the graph
+graph <- foreach (i = 1:length(theta_1)) %do% {
+  theta_i <- theta_1[i]
+  theta_i_list <- theta_i * seq(0.8, 1.2, by = 0.05)
+  objective_i <- 
+    foreach (j = 1:length(theta_i_list),
+             .combine = "rbind") %do% {
+               theta_ij <- theta_i_list[j]
+               theta_j <- theta_1
+               theta_j[i] <- theta_ij
+               objective_ij <- 
+                 compute_loglikelihood_NFP_2nd(
+                   theta_j, df, delta, L, K, G_est)
+
+               return(objective_ij)
+             }
+  df_graph <- data.frame(x = theta_i_list, y = objective_i) 
+  g <- ggplot(data = df_graph, aes(x = x, y = y)) + 
+    geom_point() +
+    geom_vline(xintercept = theta_i, linetype = "dotted") +
+    ylab("objective function") + xlab(TeX(label[i]))
+  return(g)
+}
+graph
+#save(graph, file = "data/A7_NFP_graph.RData")
+```
+
+
+```{r}
+lower <- rep(0, length(theta_1))
+upper <- c(1, 5)
+NFP_result_2step <-
+  optim(par = theta_1,
+        fn = compute_loglikelihood_NFP_2nd,
+        method = "L-BFGS-B",
+        lower = lower,
+        upper = upper,
+        control = list(fnscale = -1),
+        df = df, 
+        delta = delta,
+        L = L,
+        K = K,
+        theta2_est = theta2_est)
+save(NFP_result_2step, file = "data/A7_NFP_result_2step.RData")
+
+load(file = "data/A7_NFP_result_2step.RData")
+theta1_est <- NFP_result_2step$par
+theta1_est
+```
+
+
+```{r}
+gradient <- matrix(rep(0,4*L),ncol = 2*L)
+
+for(i in 1:(2*L)){
+  grad = numDeriv::grad(func = function(theta, df, delta, L, K, theta2_est){
+             G_est = compute_G(theta2_est[1],theta2_est[2], L, K)
+                solve_dynamic_decision(PI = 
+                                         compute_PI(alpha = theta[1], beta = theta[2], L, K),
+                                       G = G_est,
+                                       L, K, delta, lambda)$p[i] %>% log()
+              }, 
+                            x = theta1_est, 
+                            df = df, 
+                            delta = delta,
+                            L = L,
+                            K = K,
+                            theta2_est = theta2_est)
+  
+  gradient[,i] = grad
+}
+numDeriv::grad(func = function(theta, df, delta, L, K, theta2_est){
+             G_est = compute_G(theta2_est[1],theta2_est[2], L, K)
+                solve_dynamic_decision(PI = 
+                                         compute_PI(alpha = theta[1], beta = theta[2], L, K),
+                                       G = G_est,
+                                       L, K, delta, lambda)$p[1] %>% log()
+              }, 
+                            x = theta1_est, 
+                            df = df, 
+                            delta = delta,
+                            L = L,
+                            K = K,
+                            theta2_est = theta2_est)
+gradient
+grad_mat = df %>% 
+    mutate(grad_alpha = gradient[1,2*s - 1 + a],
+           grad_beta = gradient[2,2*s - 1 + a]) %>% 
+    select(grad_alpha,grad_beta) %>% 
+    as.matrix()
+
+apply(grad_mat,2,sum)
+
+numDeriv::grad(func = compute_loglikelihood_NFP_2nd, 
+                             x = theta1_est, 
+                            df = df, 
+                            delta = delta,
+                            L = L,
+                            K = K,
+                            theta2_est = theta2_est)
+```
+
+
+
+```{r}
+hessian_2step <- numDeriv::hessian(func = compute_loglikelihood_NFP, 
+                             x = c(theta1_est, theta2_est),
+                            df = df, 
+                            delta = delta,
+                            L = L,
+                            K = K)
+
+#theta_se <- sqrt(diag(solve(-hessian)))
+#dplyr::tibble(theta_est, theta_se)
+```
+```{r}
+H = hessian_2step[1:2,1:2]/(N*T)
+H_inv = solve(H)
+V = t(grad_mat) %*% grad_mat/(N*T)
+H_inv %*% V %*% H_inv; solve(V) ; - H_inv
+```
+
+
+2step standard error
+```{r}
+
+G = hessian_2step[1:2,3:4]
+inf = grad_mat + inf_1st%*%t(G)
+sqrt(diag(H_inv%*%t(inf)%*%inf%*%H_inv/(N*T)^2))
+```
+
